@@ -1,157 +1,188 @@
-# Spacecraft Attitude Control System (SACS) Testbed
+# SACS — Spacecraft Attitude Control Simulator
 
-SACS is a three-axis spacecraft attitude determination and control system (ADCS) testbed developed to evaluate attitude-control algorithms on hardware. The platform uses a spherical air bearing to approximate torque-free rotational motion, four reaction wheels for actuation, an IMU for attitude feedback, and movable counterweights for balancing.
+SACS is a single-axis, nearly frictionless spacecraft attitude-control testbed developed during Cal Poly's 2024 Summer Undergraduate Research Program (SURP). The platform rotates about its vertical $z$-axis on an air spindle and uses paired cold-gas thrusters to perform yaw maneuvers.
 
-The project is the successor to the original SADS platform and is being developed as part of a master's thesis at California Polytechnic State University, San Luis Obispo.
+This repository contains the embedded control software and MATLAB/Simulink models used to simulate, command, and validate the platform.
 
-> **Project status:** Active research and development. Interfaces, controller gains, and hardware configuration may change as testing continues.
+> SACS is the original **single-axis SURP platform**. It is distinct from SADS, the three-axis spherical-air-bearing platform.
+
+## Project goals
+
+SACS was developed to:
+
+- Create a low-complexity, low-friction physical analog of single-axis spacecraft rotation.
+- Implement closed-loop yaw control using cold-gas thrusters.
+- Compare predicted MATLAB/Simulink behavior with experimental results.
+- Provide a testbed for control-law tuning and pulse-modulated actuator logic.
 
 ## System overview
 
-The testbed consists of four main subsystems:
+The platform is built on an aluminum-extrusion frame supported by a porous-carbon air spindle. A compressed-gas supply feeds solenoid valves connected to opposing nozzle pairs. The nozzles are mounted at a moment arm from the center of rotation so that each pair produces positive or negative torque about the $z$-axis.
 
-- **Mechanical platform:** Three-axis spherical air bearing with six stepper-driven counterweights for center-of-mass balancing.
-- **Reaction-wheel assembly:** Four reaction wheels arranged in a pyramid configuration for redundant three-axis control.
-- **Flight computer and sensors:** A Raspberry Pi 5 runs the high-level control system and reads attitude data from an Xsens MTi-1-T IMU.
-- **Ground station:** Telemetry is transmitted over Wi-Fi and displayed using InfluxDB and Grafana.
+A BNO085 IMU measures platform yaw and angular rate. The embedded controller compares these measurements with the target state, calculates a desired torque using a PD control law, and converts the continuous command into discrete thruster firings.
 
 ```mermaid
 flowchart TD
-    IMU["Xsens MTi-1-T IMU"] --> PI["Raspberry Pi 5\nAttitude estimation and control"]
-    PI -->|"I²C torque commands"| RW["4 × ESP32 reaction-wheel controllers"]
-    RW --> DRV["4 × DRV8308 motor drivers"]
-    DRV --> MOTORS["4 × BLDC reaction wheels"]
-    MOTORS --> PLATFORM["Air-bearing platform dynamics"]
+    TARGET["Target yaw and yaw rate"] --> PD["PD controller"]
+    IMU["BNO085 yaw and gyro-Z"] --> PD
+    PD --> LIMIT["Torque limit and thrust conversion"]
+    LIMIT --> FILTER["First-order filter"]
+    FILTER --> RELAY["Schmitt-trigger logic"]
+    RELAY --> VALVES["Solenoid valves and cold-gas thrusters"]
+    VALVES --> PLATFORM["Single-axis air-spindle platform"]
     PLATFORM --> IMU
-    PI -->|"Wi-Fi telemetry"| GS["InfluxDB + Grafana ground station"]
 ```
 
-## Hardware
+## Control system
 
-| Component | Description |
+### PD attitude controller
+
+The controller uses yaw-angle error and yaw-rate error:
+
+$$
+u = K_p(\theta_d-\theta) + K_d(\dot{\theta}_d-\dot{\theta}),
+$$
+
+where $u$ is the requested control torque. The gains can be selected from the desired natural frequency $\omega_n$, damping ratio $\zeta$, and estimated platform inertia $I_{zz}$:
+
+$$
+K_p = I_{zz}\omega_n^2,
+\qquad
+K_d = 2\zeta\omega_n I_{zz}.
+$$
+
+The requested torque is limited to the torque available from the thrusters and converted into the equivalent force required from each nozzle.
+
+### Thruster modulation
+
+Because the solenoid valves are on/off actuators, they cannot directly produce the continuous thrust requested by the PD controller. The embedded software therefore applies:
+
+1. A first-order filter to the magnitude of the desired thrust.
+2. A Schmitt trigger with separate on and off thresholds to provide hysteresis.
+3. Sign logic to select the positive- or negative-torque thruster pair.
+
+This PWPF-style approach reduces rapid valve switching while approximating a continuous control command with discrete pulses. This reduces fuel use while maintaining pointing within predefined thresholds.
+
+### Operator controls
+
+An IR remote is used to:
+
+- Enable or disable closed-loop thruster firing [Power Button].
+- Increment or decrement $K_p$ and $K_d$ [Volume +/-].
+- Adjust the target yaw angle [see code].
+- Adjust the target yaw rate [see code].
+
+## Hardware represented by the software
+
+| Component | Function |
 | --- | --- |
-| Onboard computer | Raspberry Pi 5 |
-| IMU | Xsens MTi-1-T |
-| Reaction wheels | 4 × Nanotec DF32M024027-A BLDC flat motors |
-| Motor drivers | 4 × Texas Instruments DRV8308 |
-| Wheel controllers | 4 × DFRobot FireBeetle ESP32 |
-| Wheel arrangement | Four-wheel pyramid, approximately 28° from vertical |
-| Balancing system | 6 stepper-driven movable counterweights |
-| Test environment | Three-axis spherical air bearing |
-| Motor power | 24 V |
+| Single-axis air spindle | Provides nearly frictionless rotation about the vertical axis |
+| Aluminum-extrusion platform | Supports the avionics, gas system, and thruster moment arms |
+| Compressed-gas supply | Supplies the cold-gas propulsion system |
+| Opposing nozzle pairs | Apply positive or negative yaw torque |
+| Solenoid valves | Switch the thrusters on and off |
+| BNO085 IMU | Measures yaw angle and angular velocity about $z$ |
+| Embedded controller | Runs the feedback and thruster-modulation logic |
+| IR receiver and remote | Enables the system and supports live tuning |
 
-## Software architecture
+## Repository contents
 
-The Raspberry Pi performs attitude estimation, computes the requested body torque, allocates that torque among the four reaction wheels, and sends individual wheel commands to the ESP32 controllers over I²C.
+| File | Description |
+| --- | --- |
+| `SACS_CS_1.3.ino` | Embedded PD controller, BNO085 interface, IR-remote input, filtering, and Schmitt-trigger thruster logic |
+| `ControlledMotion.slx` | Simulink model of the closed-loop platform dynamics and pulsed-thruster controller |
+| `ControlledMotionScript.m` | Defines controlled-motion parameters, runs the model, and plots attitude, body rate, and torque |
+| `TorqueFreeMotion.slx` | Simulink model of rotational motion used to evaluate the platform dynamics |
+| `TorqueFreeMotionScript.m` | Defines the inertia, applied torque, and initial conditions for the torque-free-motion model |
 
-Each ESP32:
+## Software requirements
 
-1. Receives a commanded wheel torque.
-2. Integrates the torque command into a wheel-speed setpoint.
-3. Commands the DRV8308 motor driver using closed-loop CLKIN control or open-loop PWM when required.
-4. Measures wheel speed using the driver's `FGOUT` signal.
-5. Reports wheel speed and diagnostic state to the Raspberry Pi.
+### Embedded controller
 
-The nominal high-level control loop runs at **20 Hz**. Controllers under evaluation include:
+- Arduino IDE or a compatible build environment
+- [SparkFun BNO080/BNO085 Arduino Library](https://github.com/sparkfun/SparkFun_BNO080_Arduino_Library)
+- [Arduino-IRremote](https://github.com/Arduino-IRremote/Arduino-IRremote)
 
-- Euler-angle PD control
-- Quaternion-error PD control
-- Body-rate damping control
-- Single-axis slew and stabilization control
+The current sketch expects:
 
-A typical quaternion feedback law is
+- BNO085 I²C address: `0x4A`
+- I²C clock: `400 kHz`
+- IMU update period: `50 ms`
+- Positive- and negative-torque solenoid outputs: pins `3` and `4`
+- IR receiver input: pin `15`
+- Serial baud rate: `115200`
 
-$$
-\boldsymbol{\tau}_c =
--K_p\,\operatorname{sgn}(\eta_e)\,\boldsymbol{\epsilon}_e
--K_d\,\boldsymbol{\omega},
-$$
+Confirm the target board, pin mapping, valve-driver polarity, and electrical interface before uploading the sketch.
 
-where $\eta_e$ and $\boldsymbol{\epsilon}_e$ are the scalar and vector components of the attitude-error quaternion, and $\boldsymbol{\omega}$ is the measured body angular velocity.
+### Simulation
 
-## Coordinate system and wheel numbering
+- MATLAB
+- Simulink
+- Stateflow
 
-When viewed from above:
+The models were saved using MATLAB/Simulink R2024a. Compatibility with earlier releases is not guaranteed.
 
-- $+x$ points right.
-- $+y$ points up.
-- $+z$ points out of the page.
-- The wheels are numbered clockwise: **RW0** top-left, **RW1** top-right, **RW2** bottom-right, and **RW3** bottom-left.
+## Running the simulations
 
-Keep the coordinate convention synchronized across the IMU configuration, control law, wheel-allocation matrix, telemetry, and analysis scripts. A sign mismatch in any one of these locations can produce positive feedback instead of stabilization.
+Place each script in the same directory as its corresponding Simulink model.
 
-## Telemetry
+### Controlled motion
 
-The ground station records and displays values including:
+Open MATLAB in the repository directory and run:
 
-- Estimated attitude and body angular velocity
-- Desired and measured reaction-wheel speeds
-- Requested body torque and allocated wheel torques
-- Last wheel-speed and torque commands
-- DRV8308 `LOCKn` and `FAULTn` states
-- Controller mode and loop timing
-
-## Repository organization
-
-The repository is intended to separate flight software, wheel-controller firmware, ground-station configuration, analysis tools, and documentation:
-
-```text
-SACS/
-├── flight_software/       # Raspberry Pi control and communications software
-├── wheel_controller/      # ESP32/FreeRTOS reaction-wheel firmware
-├── ground_station/        # Grafana, InfluxDB, and Telegraf configuration
-├── analysis/              # MATLAB/Python test-data analysis
-├── hardware/              # Schematics, PCB files, CAD exports, and wiring
-├── docs/                  # System documentation and test procedures
-└── README.md
+```matlab
+ControlledMotionScript
 ```
 
-Adjust this section to match the final directory structure as the repository is populated.
+The script sets the inertia, initial attitude and body rate, controller gains, Schmitt-trigger thresholds, thruster torque, and simulation duration. It then runs `ControlledMotion.slx` and plots:
 
-## Getting started
+- Yaw angle versus time
+- Angular velocity versus time
+- Desired and commanded torque versus time
 
-The setup procedure is still being formalized. Before operating the complete platform:
+### Rotational dynamics
 
-1. Verify the 24 V motor supply and Raspberry Pi supply independently.
-2. Confirm common ground and inspect the I²C trunk, short branch connections, and pull-up configuration.
-3. Power and test each reaction-wheel controller individually.
-4. Verify wheel numbering, motor direction, `FGOUT`, `LOCKn`, and `FAULTn` behavior.
-5. Confirm IMU axes and signs using small manual rotations.
-6. Test the torque-allocation signs with the air supply **off**.
-7. Balance the platform and begin air-bearing tests with conservative torque and angle limits.
+Run:
 
-Project-specific build, flash, and launch commands should be added here once the repository layout and build system are finalized.
+```matlab
+TorqueFreeMotionScript
+```
+
+This initializes the inertia matrix, applied torque, initial angular velocity, and simulation duration before running `TorqueFreeMotion.slx`.
+
+## Running the physical platform via cold gas thrusters.
+
+1. Place the platform onto a flat and level surface.
+2. Place the paintball canister into the sleeve in the center of the platform and attach it's output hose to the thruster manifold. Be sure not to open the valve on the paintball canister until immediately prior to running a control test.
+3. Ensure that the air compressor is powered and connected to the inlet of the Air Spindle, and flip the lever to turn on the air compressor. This will allow the platform to freely spin. The air compressor will fill to ~120psi and then shut off until it falls to ~90psi, and then refill until powered off.
+4. Verify that the platform is balanced and free to rotate without cable interference. In the somewhat likely event of an unbalanced platform, you can shim the four corners with thin microfiber towels and check  the proper orientation of the platform with a levels.
+5. Open the valve of the paintball canister to allow pressurized air into the thruster manifold.
+6. Press the IR-remote power button to enable once the paintball canister's valve has been opened and the platform is freely spinning. The power button can be used to enable/disable control at any time for convenience of testing/demonstration.
+7. Once the test is complete, disable control via the power button on the IR-remote to stop the valves from opening.
+8. Once the platform is settled to a stop, close the valve on the paintball canister, and then re-enable thruster control one last time in order to purge the lines of any remaining pressurized air.
+9. Once the lines have been purged, the paintball canister can be removed and the platform can be stowed.
+
+
+## Experimental validation
+
+The Simulink model was used to predict the controlled yaw response and compare it with the physical platform. Repeated large-angle maneuver tests settled in roughly **14–15 seconds**, closely matching the simulated response. Differences between the model and experiment were attributed primarily to uncertainty in delivered thrust and unmodeled friction.
 
 ## Safety
 
-This platform contains exposed rotating hardware and operates from a 24 V supply. Reaction wheels can store substantial kinetic energy.
+This project operates pressurized gas, electrically actuated valves, and a freely rotating structure.
 
-- Wear eye protection during powered testing.
-- Keep hands, cables, and loose objects clear of rotating assemblies.
-- Secure the platform whenever the air bearing is not under active test.
-- Use conservative speed, torque, and attitude limits during initial validation.
-- Provide a readily accessible method to disable motor power.
-- Do not operate a wheel that shows mechanical damage, abnormal vibration, or unexpected driver faults.
+- Wear eye protection during pressurized testing.
+- Keep people and loose objects outside the platform's swept area.
+- Never provide power to the valves while hands or tools are near a nozzle or moving structure.
+- Always keep the paintball canister's valve closed until undergoing pressurized testing to avoid unexpected mishaps with the valves.
+- Depressurize the system before changing pneumatic connections.
+- Provide accessible electrical and pneumatic emergency shutoffs.
 
-## Current development priorities
+## Academic context
 
-- Validate consistent reaction-wheel response and speed-tracking delay.
-- Verify the wheel-allocation matrix and sign conventions on all three axes.
-- Improve startup IMU calibration and bias handling.
-- Characterize system inertia and actuator response experimentally.
-- Complete three-axis stabilization and slew testing.
-- Expand automated telemetry analysis and test reporting.
-
-## Contributing
-
-This is currently an academic research project. If the repository is opened to outside contributions, add contribution guidelines and use GitHub issues to document bugs, test results, and proposed changes.
+SACS was originally developed by **Bricen Rigby** through the 2024 Summer Undergraduate Research Program in the Aerospace Engineering Department at California Polytechnic State University, San Luis Obispo, under the guidance of **Professor Eric Mehiel**. It has since been used in multiple theses related to spacecraft attitude control simulation and testing for its utility in sensor, actuator, and control system validation.
 
 ## License
 
-No license has been selected yet. Until a license is added, all rights are reserved by default. Confirm that the repository contains no export-controlled, proprietary, security-sensitive, or employer-owned material before making it public.
-
-## Author
-
-**Bricen Rigby**  
-California Polytechnic State University, San Luis Obispo
+No license has been selected. Until a license is added, the source is not automatically licensed for reuse, modification, or redistribution.
 
